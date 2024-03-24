@@ -1,3 +1,7 @@
+/*
+	go test -bench=.
+*/
+
 package numbergenerator
 
 import (
@@ -14,6 +18,7 @@ func BenchmarkAppendRecord(b *testing.B) {
 		b.Fatalf("Could not create temporary directory: %v", err)
 	}
 	defer os.RemoveAll(dir) // clean up
+	b.Log("Temporary directory:", dir)
 
 	// Initialize the NumberGenerator with the temp directory
 	gen := NewNumberGenerator(dir)

@@ -7,16 +7,15 @@ import (
 
 func main() {
 	ng := numbergenerator.NewNumberGenerator("./data")
-	// n, _ := ng.GetLastNumber("test")
-	n, err := ng.GetFilename("test", 2)
-	fmt.Println(n, err)
-	// ng.UpdateStatus("test", 1, 1)
-	// fmt.Println(n)
 
-	// n, err := ng.AppendRecord("test", 0)
-	// fmt.Println(n, err)
-	// n, _ = ng.AppendRecord("test", 0)
-	// fmt.Println(n)
-	// n, _ = ng.AppendRecord("test2", 0)
-	// fmt.Println(n)
+	// ng.AppendRecord("test", 0)
+	// ng.AppendRecord("test", 0)
+	// ng.AppendRecord("test", 0)
+
+	ng.UpdateStatuses("test", []uint64{1, 2})
+	last_update_number, _ := ng.GetLastUpdateNumber("test")
+	fmt.Println("last update number: ", last_update_number)
+	last_number, _ := ng.GetLastNumber("test")
+	fmt.Println("last number: ", last_number)
+
 }
