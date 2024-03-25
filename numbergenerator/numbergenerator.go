@@ -209,7 +209,7 @@ func (ng *NumberGenerator) AppendRecord(primaryKey string, status byte) (uint64,
 		Filename: filename,
 	}
 
-	if _, err := file.Seek(0, os.SEEK_END); err != nil {
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		return 0, err
 	}
 	if err := binary.Write(file, binary.BigEndian, &record); err != nil {
@@ -246,6 +246,11 @@ func (ng *NumberGenerator) UpdateStatuses(primaryKey string, numbers []uint64) e
 	lock.Lock()
 	defer lock.Unlock()
 
+	_, err = file.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
 	header := FileHeader{}
 	err = binary.Read(file, binary.BigEndian, &header)
 	if err != nil {
@@ -269,6 +274,7 @@ func (ng *NumberGenerator) UpdateStatuses(primaryKey string, numbers []uint64) e
 
 	// Update the LastUpdated field to the last number in the list.
 	header.LastUpdated = numbers[len(numbers)-1]
+
 	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
@@ -392,4 +398,34 @@ func (ng *NumberGenerator) GetLastUpdateNumber(primaryKey string) (uint64, error
 	}
 
 	return header.LastUpdated, nil
+}
+
+// UpdateStatusIfMatch uses the existing UpdateStatuses function to update the status of the record associated with 'number' if 'number - 1' is equal to the last updated record number.
+func (ng *NumberGenerator) UpdateStatusIfMatch(primaryKey string, number uint64) (bool, error) {
+	// Ensure the file is open before proceeding
+	if err := ng.ensureFileOpen(primaryKey); err != nil {
+		return false, err // Return any errors encountered during file opening
+	}
+
+	// Get the last update number
+	lastUpdated, err := ng.GetLastUpdateNumber(primaryKey)
+	if err != nil {
+		return false, err // Return any errors encountered during getting the last updated number
+	}
+
+	// Check if 'number - 1' equals the last updated number
+	if number-1 == lastUpdated {
+		// If so, prepare the number for update
+		numbers := []uint64{number}
+
+		// Use the existing UpdateStatuses function to update the status
+		if err := ng.UpdateStatuses(primaryKey, numbers); err != nil {
+			return false, err // Return any errors encountered during updating statuses
+		}
+
+		return true, nil // Status updated successfully
+	}
+
+	// 'number - 1' does not equal the last updated number, no update performed
+	return false, nil
 }
