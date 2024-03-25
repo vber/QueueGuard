@@ -35,6 +35,7 @@ type NumberGenerator struct {
 }
 
 func NewNumberGenerator(basePath string) *NumberGenerator {
+	// Check if the base directory exists; if not, create it.
 	if _, err := os.Stat(basePath); os.IsNotExist(err) {
 		err := os.MkdirAll(basePath, 0755)
 		if err != nil {
@@ -42,11 +43,49 @@ func NewNumberGenerator(basePath string) *NumberGenerator {
 		}
 	}
 
-	return &NumberGenerator{
+	// Initialize the NumberGenerator.
+	ng := &NumberGenerator{
 		basePath:  basePath,
 		locks:     make(map[string]*sync.Mutex),
 		fileCache: make(map[string]*os.File),
 	}
+
+	// Open all existing files in the basePath directory.
+	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err // Propagate errors encountered during walking.
+		}
+
+		// Skip directories and focus on files, specifically checking for 'data.bin' files.
+		if !info.IsDir() && filepath.Base(path) == "data.bin" {
+			// Extract primaryKey from the directory structure based on the basePath and file path.
+			// This assumes a specific directory structure: basePath/primaryKey/data.bin
+			primaryKey := filepath.Base(filepath.Dir(path))
+
+			// Open the file for reading and writing (but do not create it if it does not exist).
+			file, err := os.OpenFile(path, os.O_RDWR, 0666)
+			if err != nil {
+				return err // Return any error encountered opening the file.
+			}
+
+			// Store the file handle in the fileCache under its primaryKey.
+			ng.fileCache[primaryKey] = file
+
+			// Initialize a lock for the primaryKey if it doesn't already exist.
+			if _, exists := ng.locks[primaryKey]; !exists {
+				ng.locks[primaryKey] = &sync.Mutex{}
+			}
+		}
+
+		return nil // Continue walking the directory tree.
+	})
+
+	// Check for errors during the walk.
+	if err != nil {
+		panic(err)
+	}
+
+	return ng
 }
 
 func getHeaderSize() int64 {
@@ -61,20 +100,39 @@ func (ng *NumberGenerator) buildFilePath(primaryKey string) string {
 	return filepath.Join(ng.basePath, primaryKey, "data.bin")
 }
 
-func (ng *NumberGenerator) GetLastNumber(primaryKey string) (uint64, error) {
+func (ng *NumberGenerator) ensureFileOpen(primaryKey string) error {
 	ng.lock.Lock()
-	file, exists := ng.fileCache[primaryKey]
-	if !exists {
-		var err error
+	defer ng.lock.Unlock()
+
+	// Check if the file is already opened and cached.
+	if _, exists := ng.fileCache[primaryKey]; !exists {
+		// Construct the file path.
 		filePath := ng.buildFilePath(primaryKey)
-		file, err = os.Open(filePath)
+
+		// Open or create the file with read-write permissions.
+		file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
-			ng.lock.Unlock()
-			return 0, err
+			return err
 		}
+
+		// Cache the opened file.
 		ng.fileCache[primaryKey] = file
+
+		// Ensure a corresponding lock is created for the new file.
+		if _, exists := ng.locks[primaryKey]; !exists {
+			ng.locks[primaryKey] = &sync.Mutex{}
+		}
 	}
-	ng.lock.Unlock()
+	return nil
+}
+
+func (ng *NumberGenerator) GetLastNumber(primaryKey string) (uint64, error) {
+	if err := ng.ensureFileOpen(primaryKey); err != nil {
+		return 0, err
+	}
+
+	// Now that the file is guaranteed to be open, proceed with the logic.
+	file := ng.fileCache[primaryKey]
 
 	_, err := file.Seek(0, io.SeekStart)
 	if err != nil {
@@ -168,18 +226,15 @@ func (ng *NumberGenerator) UpdateStatuses(primaryKey string, numbers []uint64) e
 		return nil // No updates to perform
 	}
 
-	ng.lock.Lock()
-	file, exists := ng.fileCache[primaryKey]
-	if !exists {
-		var err error
-		filePath := ng.buildFilePath(primaryKey)
-		file, err = os.OpenFile(filePath, os.O_RDWR, 0666)
-		if err != nil {
-			ng.lock.Unlock()
-			return err
-		}
-		ng.fileCache[primaryKey] = file
+	// Ensure the file is open before proceeding
+	err := ng.ensureFileOpen(primaryKey)
+	if err != nil {
+		return err // Return any errors encountered during file opening
 	}
+
+	// Proceed with file updates as before, using the now-guaranteed file from the cache
+	ng.lock.Lock()
+	file := ng.fileCache[primaryKey] // We can directly access the file as ensureFileOpen has already done the error checking
 	ng.lock.Unlock()
 
 	lock, exists := ng.locks[primaryKey]
@@ -192,7 +247,7 @@ func (ng *NumberGenerator) UpdateStatuses(primaryKey string, numbers []uint64) e
 	defer lock.Unlock()
 
 	header := FileHeader{}
-	err := binary.Read(file, binary.BigEndian, &header)
+	err = binary.Read(file, binary.BigEndian, &header)
 	if err != nil {
 		return err
 	}
@@ -228,22 +283,15 @@ func (ng *NumberGenerator) UpdateStatuses(primaryKey string, numbers []uint64) e
 
 // GetStatus retrieves the status for a given number in the binary file associated with the primary key.
 func (ng *NumberGenerator) GetStatus(primaryKey string, number uint64) (byte, error) {
-	ng.lock.Lock()
-	file, exists := ng.fileCache[primaryKey]
-	if !exists {
-		var err error
-		filePath := ng.buildFilePath(primaryKey)
-		file, err = os.Open(filePath)
-		if err != nil {
-			ng.lock.Unlock()
-			return 0, err
-		}
-		ng.fileCache[primaryKey] = file
+	// Ensure the file is open before proceeding
+	err := ng.ensureFileOpen(primaryKey)
+	if err != nil {
+		return 0, err // Return any errors encountered during file opening
 	}
-	ng.lock.Unlock()
+	file := ng.fileCache[primaryKey]
 
 	header := FileHeader{}
-	err := binary.Read(file, binary.BigEndian, &header)
+	err = binary.Read(file, binary.BigEndian, &header)
 	if err != nil {
 		return 0, err
 	}
@@ -283,23 +331,16 @@ func (ng *NumberGenerator) CloseAllFiles() {
 
 // GetFilename retrieves the filename for a given number in the binary file associated with the primary key.
 func (ng *NumberGenerator) GetFilename(primaryKey string, number uint64) (string, error) {
-	ng.lock.Lock()
-	file, exists := ng.fileCache[primaryKey]
-	if !exists {
-		var err error
-		filePath := ng.buildFilePath(primaryKey)
-		file, err = os.Open(filePath) // Open for reading; no need for os.O_RDWR
-		if err != nil {
-			ng.lock.Unlock()
-			return "", err
-		}
-		ng.fileCache[primaryKey] = file
+	// Ensure the file is open before proceeding
+	err := ng.ensureFileOpen(primaryKey)
+	if err != nil {
+		return "", err // Return any errors encountered during file opening
 	}
-	ng.lock.Unlock()
+	file := ng.fileCache[primaryKey]
 
 	// Read the header to ensure the file structure is correct and to know if the requested record exists.
 	header := FileHeader{}
-	err := binary.Read(file, binary.BigEndian, &header)
+	err = binary.Read(file, binary.BigEndian, &header)
 	if err != nil {
 		return "", err // Could not read the header
 	}
@@ -331,22 +372,15 @@ func (ng *NumberGenerator) GetFilename(primaryKey string, number uint64) (string
 
 // GetLastUpdateNumber retrieves the last updated record number from the binary file associated with the primary key.
 func (ng *NumberGenerator) GetLastUpdateNumber(primaryKey string) (uint64, error) {
-	ng.lock.Lock()
-	defer ng.lock.Unlock() // Ensures that the lock is released in case of a return
-
-	file, exists := ng.fileCache[primaryKey]
-	if !exists {
-		var err error
-		filePath := ng.buildFilePath(primaryKey)
-		file, err = os.Open(filePath) // Open for reading; no need for os.O_RDWR
-		if err != nil {
-			return 0, err
-		}
-		ng.fileCache[primaryKey] = file
+	// Ensure the file is open before proceeding
+	err := ng.ensureFileOpen(primaryKey)
+	if err != nil {
+		return 0, err // Return any errors encountered during file opening
 	}
+	file := ng.fileCache[primaryKey]
 
 	// Position the file pointer at the beginning of the file to read the header
-	_, err := file.Seek(0, io.SeekStart)
+	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
 		return 0, err
 	}
